@@ -13,6 +13,7 @@
 #include <memory.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <errno.h>
 
 #define AMOUNT_XMS_HANDLES 32
 #define XMS_REPORTED_FREE (16 * 1024 * 1024)
@@ -353,6 +354,38 @@ code_to_utf8(unsigned char *const buffer,
 	buffer[1] = 0x80 | ((code >> 6) & 0x3F);   /* 10xxxxxx */
 	buffer[2] = 0x80 | (code & 0x3F);          /* 10xxxxxx */
 	return 3;
+}
+
+// read/write routine -- Joshua Hudson <joshudson@gmail.com> 2023
+unsigned char readwrite(int handle, unsigned char *buffer, unsigned char nsectors, char mopcode)
+{
+	if (nsectors == 0) return 0xFF; // not sure if right, DosBOX does this
+	ssize_t r;
+	size_t len = (size_t)nsectors << 9;
+	ssize_t(*rw)(int,unsigned char*,size_t) = (mopcode != 3) ? (ssize_t(*)(int,unsigned char*,size_t))read:(ssize_t(*)(int,unsigned char*,size_t))write;
+	while (((r = rw(handle, buffer, len)) > 0 || r < 0 && errno == EINTR)) {
+		if (r < 0) continue; // EINTR
+		buffer += (size_t)r;
+		if (!(len -= (size_t)r)) {
+			// All data transferred
+			if (mopcode == 3) {
+#ifndef _WIN32
+				if (fdatasync(handle)) break; // r will not be 0; switches on errno
+//#else I'd have to rewrite a whole lot to implement the call on Windows.
+#endif
+			}
+			return 0;
+		}
+		// Network FS had to chunk write down
+	}
+	// Error pathway
+	if (r == 0) return 0x04; // Sector not found
+	switch (errno) {
+		case ENODEV: case ENXIO: return 0xAA; // Drive not ready
+		case EBADF: case EROFS: return mopcode == 3 ? 0x03 /* write protected */ : 0x0A;
+		case ENOSPC: case EDQUOT: return 0x04; // sparce file and out of disk: best fit is no such sector
+		default: return 0x0A; // bad sector: it's EIO and there aren't many likely cases
+	}
 }
 
 // Emulator entry point
@@ -810,9 +843,9 @@ int main(int argc, char **argv)
 						CAST(short)mem[SEGREG(REG_ES, REG_BX, 36+)] = ms_clock.millitm;
 					OPCODE 2: // DISK_READ
 					OPCODE_CHAIN 3: // DISK_WRITE
-						regs8[REG_AL] = ~lseek(disk[regs8[REG_DL]], CAST(unsigned)regs16[REG_BP] << 9, 0)
-							? ((char)i_data0 == 3 ? (int(*)())write : (int(*)())read)(disk[regs8[REG_DL]], mem + SEGREG(REG_ES, REG_BX,), regs16[REG_AX])
-							: 0;
+						regs8[REG_AH] = ~lseek(disk[regs8[REG_DL]], CAST(unsigned)regs16[REG_BP] << 9, 0)
+							? readwrite(disk[regs8[REG_DL]], mem + SEGREG(REG_ES, REG_BX,), regs8[REG_AL], (char)i_data0)
+							: (errno == EINVAL) ? 0x04 /* out of range on disk device */ : 0xAA /* no disk */;
 					OPCODE 4:	// XMS
 						callxms();
 				}
@@ -1055,7 +1088,8 @@ int main(int argc, char **argv)
 #ifndef NO_GRAPHICS
 	SDL_Quit();
 #endif
-	return 0;
+	// I really want to be able to pass an exit code out, but the pre-existing QUITEMU passes garbage. -JH
+	return (regs16[REG_BX] == 0x1234) ? regs8[REG_AL] : 0;
 }
 
 

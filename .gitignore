@@ -2,5 +2,7 @@ bios.bin
 bios.lst
 tinyxms.sys
 tinyxms.lst
+quitemu.com
+quitemu.lst
 8086tiny
 hd.img

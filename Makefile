@@ -18,11 +18,14 @@ bios.bin: bios.asm
 tinyxms.sys: tinyxms.asm
 	nasm -f bin -I ../lmacros/ -I lmacros/ -l tinyxms.lst -o tinyxms.sys tinyxms.asm
 
-8086tiny: 8086tiny.c bios.bin tinyxms.sys
+quitemu.com: quitemu.asm
+	nasm -f bin -o quitemu.com quitemu.asm
+
+8086tiny: 8086tiny.c bios.bin tinyxms.sys quitemu.com
 	${CC} 8086tiny.c ${OPTS_SDL} ${OPTS_ALL} -o 8086tiny
 	strip 8086tiny
 
-8086tiny_slowcpu: 8086tiny.c bios.bin tinyxms.sys
+8086tiny_slowcpu: 8086tiny.c bios.bin tinyxms.sys quitemu.com
 	${CC} 8086tiny.c ${OPTS_SDL} ${OPTS_ALL} ${OPTS_SLOWCPU} -o 8086tiny
 	strip 8086tiny
 
@@ -31,4 +34,4 @@ no_graphics: 8086tiny.c bios.bin tinyxms.sys
 	strip 8086tiny
 
 clean:
-	rm -f 8086tiny bios.bin bios.lst tinyxms.sys tinyxms.lst
+	rm -f 8086tiny bios.bin bios.lst tinyxms.sys tinyxms.lst quitemu.com

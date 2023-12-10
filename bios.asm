@@ -55,7 +55,7 @@ main:
 	dw	flags_mult	; Table 19: FLAGS multipliers
 
 
-biosstr	db	'8086tiny BIOS Revision 1.62!', 0, 0
+biosstr	db	'8086tiny BIOS Revision 1.70!', 0, 0
 
 
 bios_entry:
@@ -2141,6 +2141,14 @@ int13:
 	je	int13_getdisktype
 	cmp	ah, 0x16 ; Detect disk change
 	je	int13_diskchange
+	cmp	ah, 0x41
+	je	int13_echeck
+	cmp	ah, 0x42
+	je	int13_eread_disk
+	cmp	ah, 0x43
+	je	int13_ewrite_disk
+	cmp	ah, 0x48
+	je	int13_eparam
 
 	mov	ah, 1 ; Invalid function
 	jmp	reach_stack_stc
@@ -2204,18 +2212,12 @@ int13:
 
 	call	chs_to_abs
 
-	; Now, SI:BP contains the absolute sector offset of the block. We then multiply by 512 to get the offset into the disk image
+	; Now, SI:BP contains the absolute sector offset of the block.
 
-	mov	ah, 0
-	cpu	186
-	shl	ax, 9
 	extended_read_disk
-	shr	ax, 9
-	cpu	8086
-	mov	ah, 0x02	; Put read code back
 
-	cmp	al, 0
-	je	rd_error
+	cmp	ah, 0
+	jne	rd_error
 
 	; Read was successful. Now, check if we have read the boot sector. If so, we want to update
 	; our internal table of sectors/track to match the disk format
@@ -2247,14 +2249,11 @@ int13:
 
     rd_noerror:
 
-	clc
-	mov	ah, 0 ; No error
-	jmp	rd_finish
+	db 0A8h			; test al, imm8 (NC, skip stc)
 
     rd_error:
 
 	stc
-	mov	ah, 4 ; Sector not found
 
     rd_finish:
 
@@ -2323,24 +2322,16 @@ int13:
 wr_fine:
 
 	mov	ah, 0
-	cpu	186
-	shl	ax, 9
 	extended_write_disk
-	shr	ax, 9
-	cpu	8086
-	mov	ah, 0x03	; Put write code back
 
-	cmp	al, 0
-	je	wr_error
+	cmp	ah, 0
+	jne	wr_error
 
-	clc
-	mov	ah, 0 ; No error
-	jmp	wr_finish
+	db 0A8h			; test al, imm8 (NC, skip stc)
 
     wr_error:
 
 	stc
-	mov	ah, 4 ; Sector not found
 
     wr_finish:
 
@@ -2450,6 +2441,148 @@ wr_fine:
 
 	mov	ah, 0 ; Disk not changed
 	jmp	reach_stack_clc
+
+;******************************************************************
+; INT 13h LBA Extensions - Joshua Hudson <joshudson@gmail.com> 2023
+
+  int13_echeck:
+
+	cmp	dl, 0x80
+	jne	int13_enofloppy
+	mov	ah, 0x20
+	mov	bx, 0xAA55
+	mov	cx, 1
+	jmp	reach_stack_clc
+
+  int13_enofloppy:		; Special version for int13_echeck: don't set disk status
+	mov	ah, 1
+	jmp	reach_stack_stc
+
+  int13_eread_disk:
+
+	cmp	dl, 0x80
+	jne	no_int13e
+	jmp	int13_ereadwrite_disk
+
+  int13_ewrite_disk:
+
+	cmp	dl, 0x80
+	jne	no_int13e
+	;; Phoenix BIOS had to disable and move write/verify because of messed-up callers
+	;; Don't look at low bit of AL to decide write verify or not. We can't implement anyway.
+	jmp	int13_ereadwrite_disk
+
+  int13_eparam:
+
+	cmp	dl, 0x80
+	jne	no_int13e
+	cmp	[si], word 0x1E
+	jne	no_int13e
+	push	ax
+	xor	ax, ax
+	mov	[si + 2], ax
+	mov	[si + 0x06], ax
+	mov	[si + 0x0A], ax
+	mov	[si + 0x0E], ax
+	mov	[si + 0x14], ax
+	mov	[si + 0x16], ax
+	mov	[si + 0x1A], ax
+	mov	[si + 0x1E], ax
+	mov	ax, [cs:hd_max_track]	; Not bothering to detranslate -- there's no ATA device to talk to
+	mov	[si + 0x04], ax
+	mov	ax, [cs:hd_max_head]
+	mov	[si + 0x08], ax
+	mov	ax, [cs:hd_max_sector]
+	mov	[si + 0x0C], ax
+	mov	ax, [cs:hd_secs_lo]
+	mov	[si + 0x10], ax
+	mov	ax, [cs:hd_secs_hi]
+	mov	[si + 0x12], ax
+	mov	[si + 0x18], word 512
+	pop	ax
+	mov	ah, 0
+	jmp	int13_eresult
+
+  no_int13e:				; Invalid function argument
+	mov	ah, 1
+  int13_eresult:
+	mov	[cs:disk_laststatus], ah
+	cmp	ah, 0
+	jne	int13_efail
+	jmp	reach_stack_clc
+  int13_efail:
+	jmp	reach_stack_stc
+
+  int13_ereadwrite_disk:
+
+	cmp	[si], byte 0x10
+	jne	no_int13e
+	cmp	[si + 3], byte 0
+	je	int13_erangeok
+	mov	ah, 0x0D
+	jmp	int13_eresult
+
+  int13_erangefail:
+
+	mov	ah, 0x04
+	jmp	int13_eresult
+
+  int13_erangeok:
+
+	cmp	[si + 12], word 0
+	jne	int13_erangefail
+	cmp	[si + 14], word 0
+	jne	int13_erangefail
+
+	push	dx
+	push	si
+	push	ax
+	push	bp
+	push	es
+	push	bx
+
+	mov	al, [si + 2]
+	mov	es, [si + 6]
+	mov	bx, [si + 4]
+	mov	bp, [si + 8]
+	mov	si, [si + 10]
+	mov	dl, 0		; Hard disk handle offset
+
+	cmp	si, [cs:hd_secs_hi]
+	jb	int13_erangeok2
+	ja	int13_erangefail2
+	cmp	bp, [cs:hd_secs_lo]
+	jae	int13_erangefail2
+
+  int13_erangeok2:
+	cmp	ah, 0x43
+	je	int13_ewritecall
+
+	extended_read_disk
+	jmp	int13_edecode
+
+  int13_ewritecall:
+
+	extended_write_disk
+	;jmp	int13_edecode
+
+  int13_edecode:
+
+	mov	dh, ah
+	pop	bx
+	pop	es
+	pop	bp
+	pop	ax
+	mov	ah, dh
+	pop	si
+	pop	dx
+
+	jmp	int13_eresult
+
+  int13_erangefail2:
+
+	mov	ah, 0x04
+	jmp	int13_edecode
 
 ; ************************* INT 14h - serial port functions
 
@@ -3880,6 +4013,7 @@ int_table	dw int0
           	dw int1d
           	dw 0xf000
           	dw int1e
+          	dw 0xf000
 
 itbl_size equ $-int_table
 
@@ -4087,4 +4221,4 @@ tm_msec		equ $+36
 
 mem_top:
 	jmp 0F000h:100h
-	db '03/08/14', 0, 0xfe, 0
+	db '11/26/23', 0, 0xfe, 0

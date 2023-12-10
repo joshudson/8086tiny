@@ -7,4 +7,6 @@ then
 else
     ./8086tiny bios.bin fd.img
 fi
+Q=$?
 stty cooked echo
+exit $Q
