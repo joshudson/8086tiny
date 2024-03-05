@@ -34,7 +34,17 @@ help:
 	int	21h
 	ret
 go:
-	xchg	ax, dx
-	mov	bx, 0x1234	; Tell emulator to use AL as exit code
-	jmp	0:0		; Actual enstruction that exits emulator
+	mov	bp, 0x1234	; Tell emulator to use AL as exit code
+	xor	bx, bx
+	mov	ax, 5304h
+	int	15h
+	mov	ax, 5301h
+	int	15h
+	mov	ax, 5307h
+	mov	cx, 3
+	inc	bx
+	int	15h
+	mov	ax, 4C01h	; Power off failed
+	int	21h
+	ret			; DOS 1.0
 msg	db	'Quits 8086tiny emulator', 13, 10, 'Usage: QUITEMU [exit code]', 13, 10, '$'

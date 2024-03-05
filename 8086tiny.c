@@ -65,6 +65,7 @@
 #ifndef GRAPHICS_UPDATE_DELAY
 #define GRAPHICS_UPDATE_DELAY 360000
 #endif
+#define APM_INST_DELAY 1000
 #define KEYBOARD_TIMER_UPDATE_DELAY 20000
 #define HALT_TIME_MICROSECONDS 100
 #define KEYBOARD_TIMER_DELAY_FROM_HALT 1000
@@ -205,10 +206,13 @@ unsigned char mem[RAM_SIZE + 16], io_ports[IO_PORT_COUNT + 16],
 	hlt_this_time, setting_ss, prior_setting_ss, reset_ip_after_rep_trace,
 	shift_count;
 unsigned short *regs16, reg_ip, seg_override, file_index, wave_counter, reg_ip_before_rep_trace;
-unsigned int op_source, op_dest, rm_addr, op_to_addr, op_from_addr, i_data0, i_data1, i_data2, scratch_uint, scratch2_uint, keyboard_timer_inst_counter, graphics_inst_counter, set_flags_type, GRAPHICS_X, GRAPHICS_Y, pixel_colors[16], vmem_ctr;
-int op_result, disk[3], scratch_int;
+unsigned int op_source, op_dest, rm_addr, op_to_addr, op_from_addr, i_data0, i_data1, i_data2, scratch_uint, scratch2_uint, keyboard_timer_inst_counter, graphics_inst_counter, apm_inst_counter, set_flags_type, GRAPHICS_X, GRAPHICS_Y, pixel_colors[16], vmem_ctr;
+int op_result, disk[3], scratch_int, device_status;
 time_t clock_buf;
 struct timeb ms_clock;
+
+#define DEVICE_STATUS_GRAPHICS 1
+#define DEVICE_STATUS_FASTCPU 2
 
 #ifndef NO_GRAPHICS
 SDL_AudioSpec sdl_audio = {44100, AUDIO_U8, 1, 0, 128};
@@ -220,6 +224,7 @@ unsigned short vid_addr_lookup[VIDEO_RAM_SIZE], cga_colors[4] = {0 /* Black */, 
 // Helper functions
 
 void callxms();
+void callapm();
 
 // Set carry flag
 char set_CF(int new_CF)
@@ -848,6 +853,8 @@ int main(int argc, char **argv)
 							: (errno == EINVAL) ? 0x04 /* out of range on disk device */ : 0xAA /* no disk */;
 					OPCODE 4:	// XMS
 						callxms();
+					OPCODE 5:
+						callapm();
 				}
 				if ((uint8_t)i_data0 == 11	// ud2
 					|| (uint8_t)i_data0 >= 32)
@@ -1023,7 +1030,7 @@ int main(int argc, char **argv)
 			graphics_inst_counter = 0;
 			hlt_this_time = 0;
 			// Video card in graphics mode?
-			if (io_ports[0x3B8] & 2)
+			if (io_ports[0x3B8] & 2 && device_status & DEVICE_STATUS_GRAPHICS)
 			{
 				// If we don't already have an SDL window open, set it up and compute color and video memory translation tables
 				if (!sdl_screen)
@@ -1057,6 +1064,11 @@ int main(int argc, char **argv)
 			SDL_PumpEvents();
 		}
 #endif
+		if (!setting_ss && !hlt_this_time && !(device_status & DEVICE_STATUS_FASTCPU) && ++apm_inst_counter >= APM_INST_DELAY) {
+			hlt_this_time = 1;
+			apm_inst_counter = 0;
+		}
+
 		if (hlt_this_time) {
 			struct timespec ts;
 			ts.tv_sec = 0;
@@ -1238,6 +1250,54 @@ uint32_t getfreexms() {
 		 */
 	}
 	return lower;
+}
+
+void callapm() {
+	char buf[12];
+	int h, tmp;
+	switch (regs8[REG_AH]) {
+	OPCODE_CHAIN 0: // CPU slow
+		device_status &= ~DEVICE_STATUS_FASTCPU;
+	OPCODE 1: // CPU normal
+		device_status |= DEVICE_STATUS_FASTCPU;
+	OPCODE 2: // graphics card off
+		device_status &= ~DEVICE_STATUS_GRAPHICS;
+	OPCODE 3: // graphics card on
+		device_status |= DEVICE_STATUS_GRAPHICS;
+	OPCODE 4: // Get battery status
+#ifdef _WIN32
+		regs8[REG_BL] = 0xff;
+#else
+		h = open("/sys/class/power_supply/BAT0/status", O_RDONLY);
+		if (h >= 0 && (0 < read(h, buf, 12)))
+			regs8[REG_BL] = buf[0] == 'C' ? 3 /* charging */ : 2 /* critical */;
+		else
+			regs8[REG_BL] = 0xFF; // Unable
+		if (h >= 0) close(h);
+		h = open("/sys/class/power_supply/BAT0/capacity", O_RDONLY);
+		if (h >= 0 && ((tmp = read(h, buf, 10)) > 0))
+			buf[tmp] = 0, regs8[REG_CL] = atoi(buf);
+		else
+			regs8[REG_CL] = 0xFF; // Unable
+		if (h >= 0) close(h);
+		if (regs8[REG_CL] != 0xFF && regs8[REG_BL] == 2) {
+			if (regs8[REG_CL] >= 50) regs8[REG_BL] = 0; // High
+			else if (regs8[REG_CL] >= 10) regs8[REG_BL] = 1; // Low
+			// If we can't get battery charge and we're not charging it's critical
+		}
+#endif
+	OPCODE 5: // Get AC status
+#ifdef _WIN32
+		regs8[REG_BH] = 0xff;
+#else
+		h = open("/sys/class/power_supply/AC/online", O_RDONLY);
+		if (h >= 0 && (0 < read(h, buf, 2)))
+			regs8[REG_BH] = buf[0] - 1; // 0 = offline, 1 = online
+		else
+			regs8[REG_BH] = 0xFF; // Unable
+		if (h >= 0) close(h);
+#endif
+	}
 }
 
 

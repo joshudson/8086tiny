@@ -88,7 +88,15 @@ bios_entry:
 
 	; Now we can do whatever we want! DL starts off being the boot disk.
 
+	cmp	byte [cs:boot_state], 0
+	jne	.warm_early_boot
 	mov	[cs:boot_device], dl
+.warm_early_boot:
+	mov	[cs:apm_flags], byte 0
+
+	; Set CPU to high power
+	mov	ah, 1
+	db	0x0f, 0x05
 
 	; Set up Hercules graphics support. We start with the adapter in text mode
 
@@ -110,6 +118,10 @@ bios_entry:
 	mov	dx, 0x3b5
 	mov	al, 0x57	; 0x57 = 87 (* 4) = 348 pixels high (GRAPHICS_Y)
 	out	dx, al
+
+	; Graphics power on
+	mov	ah, 3
+	db	0x0f, 0x05
 
 	pop	dx
 
@@ -2610,6 +2622,8 @@ int15:	; Here we do not support any of the functions, and just return
 	; je	int15_intercept
 	cmp	ah, 0x88
 	je	int15_getextmem
+	cmp	ah, 0x53
+	je	int15_apm
 
 ; Otherwise, function not supported
 
@@ -2643,10 +2657,218 @@ int15_getextmem:
 	db 0Fh, 04h		; call into XMS interface
 	cmc			; if it returned NC, it means error
 	jnc .ret		; no error -->
-	mov ah, 86h
+	; No XMS interface but high memory exists
+	mov ax, 64
+	clc
 .ret:
 	jmp reach_stack_carry
 
+int15_apmversion:
+	cmp	cx, 0x101
+	ja	.nope
+	mov	ax, 0x101
+	jmp	reach_stack_clc
+.nope	mov	ah, 0x0b
+	jmp	reach_stack_stc
+
+int15_apmbogonstate:
+	jmp	reach_stack_clc
+
+int15_apm:
+	cmp	al, 0
+	je	.apmchk
+	cmp	al, 1
+	je	.real
+	cmp	al, 2
+	je	.prot16
+	cmp	al, 3
+	je	.prot32
+	cmp	al, 4
+	je	.realdc
+	cmp	al, 5
+	je	.cpuidle
+	cmp	al, 6
+	je	.cpubusy
+	cmp	al, 7
+	je	.setpower
+	cmp	al, 8
+	je	.ends
+	cmp	al, 9
+	je	.ends
+	cmp	al, 10
+	je	.getbattery
+	cmp	al, 11
+	je	.getevent
+	cmp	al, 12
+	je	.getpower
+	cmp	al, 13
+	je	int15_apmbogonstate
+	cmp	al, 14
+	je	int15_apmversion
+	mov	ah, 0ah
+	jmp	.fail
+
+.prot16:	; 16 bit protected mode, but we're an 8086
+	mov	ah, 6
+	jmp	.fail
+.prot32:	; 32 bit protected mode, lolno
+	mov	ah, 8
+.fail	jmp	reach_stack_stc
+.apmchk:
+	mov	ax, 0x101
+	mov	bx, 'PM'
+	mov	cx, 4
+.ok	jmp	reach_stack_clc
+
+.realdc:	; Real mode APM disconnect
+	test	[cs:apm_flags], byte 1
+	jz	.notconnected
+	mov	[cs:apm_flags], byte 0
+	mov	ah, 1			; Take CPU out of idle
+	db	0x0f, 0x05
+	jmp	reach_stack_clc
+.notconnected:
+	mov	ah, 0x03
+	jmp	.fail
+
+.real:	; Real mode connect -- neither of these do anything interesting
+	; Suspend would turn off the mouse; so we can't easily implement a good idle policy
+	test	[cs:apm_flags], byte 1
+	jnz	.realalready
+	or	bx, bx
+	jnz	.fail
+	mov	[cs:apm_flags], byte 1
+	jmp	.ok
+.realalready:
+	mov	ah, 0x02
+	jmp	.fail
+
+.cpuidle:
+	test	[cs:apm_flags], byte 1
+	jz	.notconnected
+	push	ax
+	mov	ah, 0
+	db	0x0f, 0x05
+	pop	ax
+	jmp	.ok
+
+.cpubusy:	; Documentation says bios should be able to tell; this bios can't
+		; However this bios can only slow on cpuidle so it's all right
+	test	[cs:apm_flags], byte 1
+	jz	.notconnected
+	push	ax
+	mov	ah, 1
+	db	0x0f, 0x05
+	pop	ax
+	jmp	.ok
+
+.ends:		; Enable/disable is NOP
+	test	[cs:apm_flags], byte 1
+	jz	.notconnected
+	cmp	bx, 0xffff
+	je	.ok
+	jmp	.fail
+
+.setpower:
+	test	[cs:apm_flags], byte 1
+	jz	.notconnected
+	cmp	cx, 3
+	ja	.nos
+	je	.cxk
+	cmp	cx, 0
+	jne	.nxs
+.cxk	cmp	bx, 1
+	je	.system
+	cmp	bx, 0x100
+	je	.graphics
+.nodevice:
+	mov	ah, 9
+	jmp	.fail
+.nos	mov	ah, 0x0a
+	jmp	.fail
+.nxs	mov	ah, 0x60
+	jmp	.fail
+
+.system	cmp	cx, 3
+	je	.poweroff
+	jmp	.ok
+.graphics:
+	push	ax
+	mov	ah, 3
+	cmp	cx, 3
+	and	[cs:apm_flags], byte 0xfb
+	je	.graphicsoff
+	mov	ah, 2
+	or	[cs:apm_flags], byte 4
+.graphicsoff:
+	db	0x0f, 0x05
+	pop	ax
+	jmp	.ok
+
+.poweroff:	; Turn off the system
+	mov	bx, bp	; Get error code from caller, if any
+	mov	ax, dx
+	jmp	0:0
+
+.getpower:
+	cmp	bx, 0x100
+	je	.getgraphics
+	cmp	bx, 1		; System
+	jne	.nodevice
+	mov	cx, 1
+	jmp	.ok
+.getgraphics:
+	xor	cx, cx
+	test	[cs:apm_flags], byte 4
+	jz	.getgraphicson
+	mov	cl, 3
+.getgraphicson:
+	jmp	.ok
+
+.getbattery:
+	cmp	bx, 1
+	ja	.nodevice	; asks for specific battery; but we are APM 1.1
+	push	ax
+	; This call always succeeds
+	mov	ah, 4
+	db	0x0f, 0x05
+	mov	ah, 5
+	db	0x0f, 0x05
+	pop	ax
+	jmp	reach_stack_clc
+
+.getevent:
+	; There's only one event: battery
+	test	[cs:apm_flags], byte 1
+	jz	.notconnected
+	push	bp
+	mov	bp, sp
+	push	ax
+	push	bx
+	push	cx
+	mov	ah, 4
+	db	0x0f, 0x05
+	cmp	bl, 2
+	jne	.gennocrit
+	test	[cs:apm_flags], byte 2
+	jz	.gencritalready
+	or	[cs:apm_flags], byte 2
+	; I hate this specification. What is labelled as low battery notification is critical battery notification and
+	; what is labelled as critical battery notification is critical batter after waking from unscheduled suspend. -JH
+	mov	[bp - 4], word 5	; AX = battery notification
+	clc
+	jmp	.geexit
+.gennocrit:
+	and	[cs:apm_flags], byte 0xfd
+.gencritalready:
+	mov	[bp - 1], byte 80h	; AH = no event
+	stc
+.geexit:
+	pop	cx
+	pop	bx
+	pop	ax
+	pop	bp
+	jmp	reach_stack_carry
 
 ; ************************* INT 16h handler - keyboard
 
@@ -4049,6 +4271,9 @@ crt_curpos_y_last	db	0
 
 last_int8_msec	dw	0
 last_key_sdl	db 	0
+
+; APM data
+apm_flags	db	0
 
 ; Now follow the tables for instruction decode helping
 
