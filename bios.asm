@@ -94,13 +94,13 @@ bios_entry:
 .warm_early_boot:
 	mov	[cs:apm_flags], byte 0
 
+	push	ax
+
 	; Set CPU to high power
 	mov	ah, 1
 	db	0x0f, 0x05
 
 	; Set up Hercules graphics support. We start with the adapter in text mode
-
-	push	dx
 
 	mov	dx, 0x3b8
 	mov	al, 0
@@ -122,8 +122,6 @@ bios_entry:
 	; Graphics power on
 	mov	ah, 3
 	db	0x0f, 0x05
-
-	pop	dx
 
 	pop	ax
 
