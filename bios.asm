@@ -2229,23 +2229,33 @@ int13:
 
 	push	ax
 
+	mov	ax, [es:bx]
+	cmp	al, 0xE9
+	je	.jmps
+	inc	ah
+	cmp	al, 0xEB
+	jne	.noupd		; If disk is not formatted DOS, don't update
+.jmps	cmp	ah, 0x1A	; If short BPB, do not update (should not occur)
+	jb	.noupd
+
 	mov	al, [es:bx+24]	; Number of SPT in floppy disk BPB
+	mov	ah, [es:bx+26]  ; Number of Heads in floppy disk BPB
+	cmp	al, 0
+	je	.noupd
+	cmp	al, 36		; Out of range
+	ja	.noupd
+	cmp	ah, 1
+	jb	.noupd
+	cmp	ah, 2		; Out of range
+	ja	.noupd
 
-	; cmp	al, 0		; If disk is unformatted, do not update the table
-	; jne	rd_update_spt
-	cmp	al, 9		; 9 SPT, i.e. 720K disk, so update the table
-	je	rd_update_spt
-	cmp	al, 18
-	je	rd_update_spt	; 18 SPT, i.e. 1.44MB disk, so update the table
+	mov	[cs:int1e_spt], al
+	mov	[cs:int1e_heads], ah
 
-	pop	ax
+.noupd	pop	ax
 
 	jmp	rd_noerror
 
-    rd_update_spt:
-
-	mov	[cs:int1e_spt], al
-	pop	ax
 
     rd_noerror:
 
@@ -2370,7 +2380,9 @@ wr_fine:
 	mov	bx, 4
 	mov	ch, 0x4f
 	mov	cl, [cs:int1e_spt]
-	mov	dx, 0x0101
+	mov	dl, 1
+	mov	dh, [cs:int1e_heads]
+	dec	dh
 
 	mov	byte [cs:disk_laststatus], 0
 	jmp	reach_stack_clc
@@ -2952,6 +2964,7 @@ int1c:
 
 ; ************************* INT 1Eh - diskette parameter table
 
+
 int1e:
 
 		db 0xdf ; Step rate 2ms, head unload time 240ms
@@ -2965,6 +2978,8 @@ int1e_spt	db 18	; 18 sectors per track (1.44MB)
 		db 0xF6 ; Format filler byte
 		db 0x0F ; Head settle time (1 ms)
 		db 0x08 ; Motor start time in 1/8 seconds
+
+int1e_heads	db 2	; Not part of table; used for disk switching
 
 ; ************************* INT 41h - hard disk parameter table
 
@@ -3168,8 +3183,10 @@ chs_to_abs:
 
 	jne	chs_hd
 
+	cmp	[cs:int1e_heads], byte 1
+	je	._1side
 	shl	ax, 1 ; Multiply by 2 (number of heads on FD)
-	push	ax
+._1side	push	ax
 	xor	ax, ax
 	mov	al, [cs:int1e_spt]
 	mov	[cs:drive_sectors_temp], ax ; Retrieve sectors per track from INT 1E table
